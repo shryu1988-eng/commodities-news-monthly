@@ -1,0 +1,66 @@
+run:
+  lookback_days: 35           # 최근 35일 기사에서 월간용으로 뽑기
+  max_total: 20               # 전체 결과 최대 20건
+  per_commodity_min: 2        # 품목 최소 2건(7품목=14건), 남은 6건은 최신순 보충
+  output_dir: "out"           # CSV 저장 폴더
+
+email:
+  to: "shryu1988@gmail.com"   # 수신자 (변경 가능)
+  subject_prefix_ko: "[월간 원자재 뉴스 요약]"  # 메일 제목 접두사
+  from_name_ko: "마케팅팀 자동 리포트"          # 보내는 사람 이름(표시용)
+
+commodities:
+  - code: COPPER
+    names:
+      en: ["copper","LME copper","Cu metal"]
+      ko: ["구리","LME 구리"]
+      zh: ["铜","伦敦铜"]
+    must_have: ["price","policy","export","tariff","supply","demand","mine","smelter","strike","sanction","output","production"]
+
+  - code: ALUMINIUM
+    names:
+      en: ["aluminium","aluminum","LME aluminium"]
+    # ko/zh도 추가해 둠
+      ko: ["알루미늄","LME 알루미늄"]
+      zh: ["铝","伦敦铝"]
+    must_have: ["price","smelter","power","cost","export","tariff","supply","demand","capacity"]
+
+  - code: TUNGSTEN
+    names:
+      en: ["tungsten","APT","ammonium paratungstate","WO3"]
+      ko: ["텅스텐","APT","암모늄 파라텅스테이트"]
+      zh: ["钨","仲钨酸铵","APT"]
+    must_have: ["price","quota","export","policy","mine","smelter","supply","demand"]
+
+  - code: GRAPHITE
+    names:
+      en: ["graphite","anode materials","synthetic graphite","flake graphite"]
+      ko: ["흑연","음극재"]
+      zh: ["石墨","负极材料"]
+    must_have: ["price","export","policy","EV","battery","anode","supply","demand"]
+
+  - code: ACRYLONITRILE
+    names:
+      en: ["acrylonitrile","ACN","propylene-ACN"]
+      ko: ["아크릴로니트릴","ACN"]
+      zh: ["丙烯腈","ACN"]
+    must_have: ["price","plant","shutdown","maintenance","export","supply","demand"]
+
+  - code: THICK_PLATES
+    names:
+      en: ["thick plates","heavy plate","plate steel"]
+      ko: ["후판","후판강","중후판"]
+      zh: ["厚板","中厚板","钢板"]
+    must_have: ["price","tariff","export","capacity","mill","supply","demand","shipbuilding"]
+
+  - code: CARBON_FIBERS
+    names:
+      en: ["carbon fiber","CF","PAN-based","pitch-based"]
+      ko: ["탄소섬유"]
+      zh: ["碳纤维"]
+    must_have: ["price","capacity","export","policy","aerospace","pressure vessel","linepipe","supply","demand"]
+
+sources:
+  # 원하면 신뢰/비신뢰 도메인 정책을 운영할 수 있습니다.
+  whitelist_domains: []
+  blacklist_domains: ["reddit.com","x.com","twitter.com"]
