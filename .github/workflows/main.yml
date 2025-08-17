@@ -1,0 +1,31 @@
+name: Monthly Commodities Email
+
+on:
+  schedule:
+    - cron: "0 0 1 * *"       # 매월 1일 00:00 UTC = 한국 시간 09:00
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run script
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+          EVENT_REGISTRY_API_KEY: ${{ secrets.EVENT_REGISTRY_API_KEY }}
+        run: python main.py
+      - name: Upload CSV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: monthly-csv
+          path: out/*.csv
