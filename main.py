@@ -1,8 +1,13 @@
-import os, json, math, re
+# main.py
+# -------------------------------
+# 월간 원자재 기사 수집 → 중복 제거 → 최대 20건 선별 → 한국어 메일 본문 + CSV 첨부 발송
+# 안정화 패치: 안전 JSON 파싱, 재시도(간격 포함), GDELT Context 2.0의 72시간 제한 반영
+# -------------------------------
+
+import os, re, json, time
 import requests
 import pandas as pd
 from datetime import datetime, timedelta, timezone
-from dateutil.relativedelta import relativedelta
 import yaml, tldextract
 from rapidfuzz import fuzz, process
 
@@ -10,28 +15,30 @@ from rapidfuzz import fuzz, process
 import smtplib
 from email.message import EmailMessage
 from email.utils import formataddr
-from email.headerregistry import Address
 
+# ---- 환경 변수 (GitHub Secrets로 세팅 권장) ----
+NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "")                   # 선택
+EVENT_REGISTRY_API_KEY = os.getenv("EVENT_REGISTRY_API_KEY", "")  # 선택
+GMAIL_USER = os.getenv("GMAIL_USER", "")                     # 필수(이메일 버전)
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")     # 필수(이메일 버전)
+
+# ---- 타임존/상수 ----
 KST = timezone(timedelta(hours=9))
 
-NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "")                 # 옵션 (있으면 사용)
-EVENT_REGISTRY_API_KEY = os.getenv("EVENT_REGISTRY_API_KEY", "")  # 옵션 (있으면 사용)
-GMAIL_USER = os.getenv("GMAIL_USER", "")                   # 필수: 보내는 Gmail 주소
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")   # 필수: 앱 비밀번호(2단계 인증 후 생성)
-
-# ------------------ 설정 ------------------
+# ---- 설정 로드 ----
 with open("config.yaml", "r", encoding="utf-8") as f:
     CFG = yaml.safe_load(f)
 
 OUTDIR = CFG["run"]["output_dir"]
 os.makedirs(OUTDIR, exist_ok=True)
 
+# ---- 기간 계산 ----
 def daterange():
     end = datetime.now(tz=KST)
     start = end - timedelta(days=int(CFG["run"]["lookback_days"]))
     return start, end
 
-# ------------------ 유틸 ------------------
+# ---- 공통 유틸 ----
 def norm_domain(url):
     try:
         ext = tldextract.extract(url)
@@ -51,15 +58,45 @@ def simple_summary(text, max_len=40):
     text = re.sub(r"\s+", " ", (text or "")).strip()
     return " ".join(text.split()[:max_len])
 
+def safe_json(resp):
+    """
+    응답이 JSON이 아니거나 비었을 때 None 반환.
+    GDELT/외부 API가 간헐적으로 HTML/빈 본문을 반환하는 경우 방어.
+    """
+    try:
+        ct = (resp.headers.get("Content-Type") or "").lower()
+        if "json" not in ct:
+            return None
+        return resp.json()
+    except Exception:
+        return None
+
+def get_with_retry(url, params=None, headers=None, tries=3, sleep_sec=5, timeout=30):
+    """
+    일시 오류/비JSON 응답을 흡수하기 위한 재시도.
+    참고: GDELT 측도 가이던스에서 레이트 리미팅/간헐적 응답을 언급합니다. (재시도 권장)
+    """
+    for i in range(tries):
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=timeout)
+        except Exception:
+            r = None
+        data = safe_json(r) if (r and r.ok) else None
+        if data:
+            return data
+        if i < tries - 1:
+            time.sleep(sleep_sec)
+    return {}
+
 def dedupe(df):
-    if df.empty: return df
+    if df.empty: 
+        return df
     df["title_norm"] = df["title"].str.lower().str.replace(r"[^a-z0-9가-힣一-龥 ]","", regex=True).str.strip()
     df["domain"] = df["url"].apply(norm_domain)
     df = df.drop_duplicates(subset=["domain","title_norm"])
-    # 추가 유사도 중복 제거(제목 유사 90 이상)
-    keep = []
-    seen = []
-    for i, row in df.iterrows():
+    # 제목 유사도 중복 제거(90 이상)
+    keep, seen = [], []
+    for _, row in df.iterrows():
         t = row["title_norm"]
         if not seen:
             keep.append(True); seen.append(t); continue
@@ -71,44 +108,54 @@ def dedupe(df):
     return df[pd.Series(keep, index=df.index)].drop(columns=["title_norm"])
 
 def select_top_cap(df_all, max_total=20, per_min=2):
-    if df_all.empty: return df_all
+    if df_all.empty:
+        return df_all
     df_all = df_all.sort_values("published", ascending=False)
+
+    # 1) 품목별 최소 할당
     picks = []
     for code, sub in df_all.groupby("commodity"):
         picks.append(sub.head(per_min))
     base = pd.concat(picks).drop_duplicates(subset=["url"])
+
+    # 2) 최신순으로 보충
     remain = max_total - len(base)
     if remain > 0:
         extra = (df_all[~df_all["url"].isin(base["url"])]).head(remain)
         sel = pd.concat([base, extra])
     else:
         sel = base.head(max_total)
+
     return sel.sort_values("published", ascending=False).head(max_total)
 
 def query_terms(names, must_have):
+    # (copper OR 구리 OR 铜) AND (price OR export ...)
     name_part = "(" + " OR ".join(sorted(set(sum(names.values(), [])))) + ")"
     mh_part = "(" + " OR ".join(must_have) + ")"
     return f"{name_part} AND {mh_part}"
 
-# ------------------ 수집기 ------------------
-# GDELT Doc 2.0 (문서 검색, ArtList로 기사 목록) – 공개 API, 키 불필요 :contentReference[oaicite:2]{index=2}
+# ---- 수집기 ----
+# GDELT Doc 2.0 (ArtList/JSON) — 전 세계 뉴스 문서 메타 검색
+# 공식 블로그 문서: JSON/ArtList 등 포맷 안내.  :contentReference[oaicite:0]{index=0}
 def fetch_gdelt_doc(q, start, end, lang=None):
     url = "https://api.gdeltproject.org/api/v2/doc/doc"
     params = {
         "format": "JSON",
         "mode": "ArtList",
-        "maxrecords": 120,    # 최대치 250 언급 사례, 여기선 적당히 제한 :contentReference[oaicite:3]{index=3}
+        "maxrecords": 120,
         "sort": "datedesc",
         "query": q,
         "startdatetime": start.strftime("%Y%m%d%H%M%S"),
         "enddatetime": end.strftime("%Y%m%d%H%M%S"),
     }
-    if lang: params["sourcelang"] = lang
-    r = requests.get(url, params=params, timeout=30)
-    data = r.json() if r.ok else {}
+    if lang: 
+        params["sourcelang"] = lang
+
+    data = get_with_retry(url, params=params, tries=3, sleep_sec=5)
     rows = []
-    for a in data.get("articles", []):
-        if not allow_domain(a.get("url","")): continue
+    for a in (data.get("articles") or []):
+        if not allow_domain(a.get("url","")): 
+            continue
         rows.append({
             "source": "GDELT",
             "title": a.get("title"),
@@ -120,23 +167,29 @@ def fetch_gdelt_doc(q, start, end, lang=None):
         })
     return rows
 
-# GDELT Context 2.0 (문장 단위 스니펫 제공) – 공개 API, 키 불필요 :contentReference[oaicite:4]{index=4}
+# GDELT Context 2.0 — 문장 단위 스니펫 제공 (ArticleList 출력 포맷 지원)
+# 주의: Context 2.0은 "최근 72시간" 윈도 내에서 START/END가 유효합니다.  :contentReference[oaicite:1]{index=1}
 def fetch_gdelt_context(q, start, end, lang=None):
+    ctx_end = datetime.now(tz=KST)
+    ctx_start = max(ctx_end - timedelta(hours=72), start)
+
     url = "https://api.gdeltproject.org/api/v2/doc/context"
     params = {
         "format":"JSON",
         "query": q,
         "maxrecords": 80,
         "mode":"ArtList",
-        "startdatetime": start.strftime("%Y%m%d%H%M%S"),
-        "enddatetime": end.strftime("%Y%m%d%H%M%S"),
+        "startdatetime": ctx_start.strftime("%Y%m%d%H%M%S"),
+        "enddatetime": ctx_end.strftime("%Y%m%d%H%M%S"),
     }
-    if lang: params["sourcelang"] = lang
-    r = requests.get(url, params=params, timeout=30)
-    data = r.json() if r.ok else {}
+    if lang: 
+        params["sourcelang"] = lang
+
+    data = get_with_retry(url, params=params, tries=3, sleep_sec=5)
     rows = []
-    for a in data.get("articles", []):
-        if not allow_domain(a.get("url","")): continue
+    for a in (data.get("articles") or []):
+        if not allow_domain(a.get("url","")): 
+            continue
         rows.append({
             "source": "GDELT-CTX",
             "title": a.get("title"),
@@ -148,24 +201,28 @@ def fetch_gdelt_context(q, start, end, lang=None):
         })
     return rows
 
-# NewsAPI (옵션, 키 있으면 사용). pageSize 최대 100, page로 페이징. :contentReference[oaicite:5]{index=5}
+# NewsAPI (선택) — Everything 엔드포인트, pageSize 최대 100  :contentReference[oaicite:2]{index=2}
 def fetch_newsapi(q, start, end):
-    if not NEWSAPI_KEY: return []
+    if not NEWSAPI_KEY: 
+        return []
     url = "https://newsapi.org/v2/everything"
     headers = {"X-Api-Key": NEWSAPI_KEY}
     params = {
         "q": q,
         "from": start.date().isoformat(),
         "to": end.date().isoformat(),
-        "pageSize": 50,      # 기본 100까지 가능, 여기선 50만 조회해 비용 절약 :contentReference[oaicite:6]{index=6}
+        "pageSize": 50,     # 최대 100까지 가능. 여기선 네트워크 비용↓
         "page": 1,
         "sortBy": "publishedAt",
     }
     r = requests.get(url, headers=headers, params=params, timeout=30)
-    data = r.json() if r.ok else {}
+    data = safe_json(r) if r.ok else None
+    if not data:
+        return []
     rows = []
     for a in data.get("articles", []):
-        if not allow_domain(a.get("url","")): continue
+        if not allow_domain(a.get("url","")): 
+            continue
         rows.append({
             "source": "NewsAPI",
             "title": a.get("title"),
@@ -177,9 +234,10 @@ def fetch_newsapi(q, start, end):
         })
     return rows
 
-# Event Registry (옵션, 키 있으면 사용) – 공식 문서/예시 참고 :contentReference[oaicite:7]{index=7}
+# Event Registry (선택) — 기사/언어 필터 등 제공
 def fetch_event_registry(q, start, end):
-    if not EVENT_REGISTRY_API_KEY: return []
+    if not EVENT_REGISTRY_API_KEY: 
+        return []
     url = "https://eventregistry.org/api/v1/article/getArticles"
     params = {
         "apiKey": EVENT_REGISTRY_API_KEY,
@@ -191,12 +249,14 @@ def fetch_event_registry(q, start, end):
         "maxItems": 120,
         "includeArticleConcepts": False
     }
-    r = requests.get(url, params=params, timeout=30)
-    data = r.json() if r.ok else {}
+    data = get_with_retry(url, params=params, tries=2, sleep_sec=5)
+    if not data:
+        return []
     res = data.get("articles", {}).get("results", [])
     rows = []
     for a in res:
-        if not allow_domain(a.get("url","")): continue
+        if not allow_domain(a.get("url","")): 
+            continue
         rows.append({
             "source": "EventRegistry",
             "title": a.get("title"),
@@ -208,32 +268,29 @@ def fetch_event_registry(q, start, end):
         })
     return rows
 
-# ------------------ 메일 ------------------
+# ---- 이메일 ----
 def send_email_ko(subject, body_markdown, attach_csv_path, to_addr):
     if not GMAIL_USER or not GMAIL_APP_PASSWORD:
-        raise RuntimeError("Gmail 발신 계정/앱 비밀번호가 없습니다. GitHub Secrets에 GMAIL_USER, GMAIL_APP_PASSWORD를 설정하세요.")
+        raise RuntimeError("Gmail 발신 계정/앱 비밀번호가 없습니다. GMAIL_USER, GMAIL_APP_PASSWORD Secrets를 설정하세요.")
 
     msg = EmailMessage()
     display_from = formataddr((CFG["email"]["from_name_ko"], GMAIL_USER))
     msg["From"] = display_from
     msg["To"] = to_addr
     msg["Subject"] = subject
-
-    # 본문(한글) – 간단한 마크다운 텍스트
     msg.set_content(body_markdown)
 
-    # CSV 첨부
     if attach_csv_path and os.path.exists(attach_csv_path):
         with open(attach_csv_path, "rb") as f:
             data = f.read()
         msg.add_attachment(data, maintype="text", subtype="csv", filename=os.path.basename(attach_csv_path))
 
-    # Gmail SMTP (smtplib 공식 모듈) :contentReference[oaicite:8]{index=8}
+    # Gmail 2단계 인증 + 앱 비밀번호 필요 (공식 가이드)  :contentReference[oaicite:3]{index=3}
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
         smtp.login(GMAIL_USER, GMAIL_APP_PASSWORD)
         smtp.send_message(msg)
 
-# ------------------ 실행 ------------------
+# ---- 실행 ----
 def run_once():
     start, end = daterange()
     frames = []
@@ -242,8 +299,8 @@ def run_once():
         rows = []
         rows += fetch_gdelt_doc(q, start, end)
         rows += fetch_gdelt_context(q, start, end)
-        rows += fetch_event_registry(q, start, end)  # 옵션
-        rows += fetch_newsapi(q, start, end)         # 옵션
+        rows += fetch_event_registry(q, start, end)  # 선택
+        rows += fetch_newsapi(q, start, end)         # 선택
         df = pd.DataFrame(rows)
         if df.empty:
             frames.append(pd.DataFrame())
@@ -282,7 +339,7 @@ def run_once():
     csv_path = os.path.join(OUTDIR, f"commodities_{stamp}.csv")
     sel_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
 
-    # 이메일 본문(한국어) – 품목별 최신 20건 요약
+    # 이메일 본문(한국어)
     lines = []
     lines.append(f"# {CFG['email']['subject_prefix_ko']} {start.date()} ~ {end.date()}\n")
     lines.append("다음은 자동 수집·중복제거 후 선정된 상위 기사입니다. (최대 20건)\n")
