@@ -1,66 +1,104 @@
+# config.yaml
+
 run:
-  lookback_days: 35           # 최근 35일 기사에서 월간용으로 뽑기
-  max_total: 20               # 전체 결과 최대 20건
-  per_commodity_min: 2        # 품목 최소 2건(7품목=14건), 남은 6건은 최신순 보충
-  output_dir: "out"           # CSV 저장 폴더
+  lookback_days: 35          # 최근 35일 범위에서 수집 (GDELT Doc 2.0은 장기간 OK, Context는 코드에서 72시간으로 자동 제한)
+  max_total: 20              # 최종 선별 최대 20건
+  per_commodity_min: 2       # 품목별 최소 보장 수 (7품목*2=14건 확보 후, 남은 6건은 점수/최신순 보충)
+  output_dir: "out"          # 결과 저장 폴더
+  excel_name: "commodities_monthly.xlsx"
 
 email:
-  to: "shryu1988@gmail.com"   # 수신자 (변경 가능)
-  subject_prefix_ko: "[월간 원자재 뉴스 요약]"  # 메일 제목 접두사
-  from_name_ko: "마케팅팀 자동 리포트"          # 보내는 사람 이름(표시용)
+  from_name_ko: "사내 마케팅 리서치"
+  subject_prefix_ko: "월간 원자재 시황 요약"
+  to: "shryu1988@gmail.com"  # 수신자(변경 가능). 발신자는 GitHub Secrets의 GMAIL_USER 사용
 
 commodities:
   - code: COPPER
     names:
-      en: ["copper","LME copper","Cu metal"]
-      ko: ["구리","LME 구리"]
-      zh: ["铜","伦敦铜"]
-    must_have: ["price","policy","export","tariff","supply","demand","mine","smelter","strike","sanction","output","production"]
+      en: ["copper","LME copper","Cu metal","copper cathode","copper concentrate"]
+      ko: ["구리","LME 구리","구리 정광","구리 전기동"]
+      zh: ["铜","伦敦铜","阴极铜","铜精矿"]
+    must_have: ["price","policy","export","tariff","supply","demand","mine","smelter","strike","sanction","output","production","inventory","warehouse","refined"]
 
   - code: ALUMINIUM
     names:
-      en: ["aluminium","aluminum","LME aluminium"]
-    # ko/zh도 추가해 둠
-      ko: ["알루미늄","LME 알루미늄"]
-      zh: ["铝","伦敦铝"]
-    must_have: ["price","smelter","power","cost","export","tariff","supply","demand","capacity"]
+      en: ["aluminium","aluminum","LME aluminium","aluminium ingot","alumina"]
+      ko: ["알루미늄","LME 알루미늄","알루미나"]
+      zh: ["铝","伦敦铝","氧化铝"]
+    must_have: ["price","smelter","power","cost","export","tariff","supply","demand","capacity","inventory","warehouse","curtailment"]
 
   - code: TUNGSTEN
     names:
-      en: ["tungsten","APT","ammonium paratungstate","WO3"]
-      ko: ["텅스텐","APT","암모늄 파라텅스테이트"]
-      zh: ["钨","仲钨酸铵","APT"]
-    must_have: ["price","quota","export","policy","mine","smelter","supply","demand"]
+      en: ["tungsten","APT","ammonium paratungstate","WO3","tungsten concentrate"]
+      ko: ["텅스텐","APT","암모늄 파라텅스테이트","텅스텐 정광"]
+      zh: ["钨","仲钨酸铵","APT","钨精矿"]
+    must_have: ["price","quota","export","policy","mine","smelter","supply","demand","auction","tender"]
 
   - code: GRAPHITE
     names:
-      en: ["graphite","anode materials","synthetic graphite","flake graphite"]
-      ko: ["흑연","음극재"]
-      zh: ["石墨","负极材料"]
-    must_have: ["price","export","policy","EV","battery","anode","supply","demand"]
+      en: ["graphite","anode materials","synthetic graphite","flake graphite","spherical graphite"]
+      ko: ["흑연","음극재","천연흑연","인조흑연","구상흑연"]
+      zh: ["石墨","负极材料","人造石墨","天然鳞片石墨","球形石墨"]
+    must_have: ["price","export","policy","EV","battery","anode","supply","demand","quota","restriction"]
 
   - code: ACRYLONITRILE
     names:
       en: ["acrylonitrile","ACN","propylene-ACN"]
       ko: ["아크릴로니트릴","ACN"]
       zh: ["丙烯腈","ACN"]
-    must_have: ["price","plant","shutdown","maintenance","export","supply","demand"]
+    must_have: ["price","plant","shutdown","maintenance","restart","export","supply","demand","turnaround"]
 
   - code: THICK_PLATES
     names:
-      en: ["thick plates","heavy plate","plate steel"]
+      en: ["thick plates","heavy plate","plate steel","medium plate"]
       ko: ["후판","후판강","중후판"]
       zh: ["厚板","中厚板","钢板"]
-    must_have: ["price","tariff","export","capacity","mill","supply","demand","shipbuilding"]
+    must_have: ["price","tariff","export","capacity","mill","supply","demand","shipbuilding","order","inventory"]
 
   - code: CARBON_FIBERS
     names:
-      en: ["carbon fiber","CF","PAN-based","pitch-based"]
-      ko: ["탄소섬유"]
-      zh: ["碳纤维"]
-    must_have: ["price","capacity","export","policy","aerospace","pressure vessel","linepipe","supply","demand"]
+      en: ["carbon fiber","CF","PAN-based","pitch-based","tow"]
+      ko: ["탄소섬유","PAN계","피치계"]
+      zh: ["碳纤维","PAN基","沥青基"]
+    must_have: ["price","capacity","export","policy","aerospace","pressure vessel","linepipe","supply","demand","qualification"]
 
 sources:
-  # 원하면 신뢰/비신뢰 도메인 정책을 운영할 수 있습니다.
-  whitelist_domains: []
-  blacklist_domains: ["reddit.com","x.com","twitter.com"]
+  # 신뢰·연관성 개선 옵션
+  whitelist_domains: []   # 비워두면 전체 허용(아래 blacklist/신뢰 가중치가 동작)
+  blacklist_domains:
+    # 소셜/루머성
+    - "reddit.com"
+    - "x.com"
+    - "twitter.com"
+    - "wechat.com"
+    - "tiktok.com"
+    # 어그리게이터/검색
+    - "news.google.com"
+    - "bing.com/news"
+    - "flipboard.com"
+    # 보도자료(Press release) 배제
+    - "prnewswire.com"
+    - "globenewswire.com"
+    - "businesswire.com"
+    - "einnews.com"
+    - "marketscreener.com"
+    - "newsfilecorp.com"
+    - "streetinsider.com"
+
+  # 도메인 신뢰도 테이블(0~1). 여기에 지정한 값은 코드 내 기본값을 덮어씁니다.
+  trust_domains:
+    # 금속·원자재 전문/벤치마크
+    "lme.com": 1.00               # LME: 시장 데이터·공지 등 공식 소스
+    "spglobal.com": 0.95          # S&P Global Commodity Insights(Platts): 벤치마크/평가
+    "fastmarkets.com": 0.92       # Fastmarkets/Metal Bulletin: 금속·철강 가격·뉴스
+    "icis.com": 0.92              # ICIS: 화학(예: ACN) 가격/분석
+    "argusmedia.com": 0.90        # Argus Media: 에너지·원자재 가격평가/뉴스
+    "mining.com": 0.88
+    "kitco.com": 0.85
+    # 범용 유력 매체
+    "reuters.com": 0.95
+    "ft.com": 0.93
+    "wsj.com": 0.92
+    "nikkei.com": 0.90
+    "bloomberg.com": 0.95
+    "cnbc.com": 0.85
